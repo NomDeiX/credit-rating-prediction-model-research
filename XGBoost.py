@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from sklearn.impute import SimpleImputer
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
@@ -13,6 +14,7 @@ from datetime import datetime
 import joblib
 from DataPrep import MacroDataMerger, WRDSFundamentalsDataMerger, CreditRatingDataMerger
 from imblearn.over_sampling import SMOTE
+
 
 class DataProcessor:
     """
@@ -141,7 +143,7 @@ class DataProcessor:
 
             # Align fundamentals with ratings_df
             if ticker in ratings_df.columns:
-                print(f"Processing {ticker}...")	
+                #print(f"Processing {ticker}...")	
                 shifted_ratings = ratings_df[['Date', ticker]].copy()
                 shifted_ratings['Date'] = shifted_ratings['Date'] - pd.DateOffset(months=3)
                 
@@ -255,41 +257,39 @@ class DataProcessor:
         Returns:
             X_train, X_val, X_test, y_train, y_val, y_test
         """
-        if undersample and smote:
-            raise ValueError("Cannot use both undersampling and SMOTE at the same time. Choose one method.")
-        
         # Identify feature columns
         feature_cols = [c for c in panel.columns if c not in ['Date', 'ticker', 'rating']]
-        
+
         # Split data either by date or by proportion
         if test_size is None or val_size is None:
             train = panel[panel['Date'] < '2023-01-01']
             valid = panel[(panel['Date'] >= '2023-01-01') & (panel['Date'] < '2024-01-01')]
             test = panel[panel['Date'] >= '2024-01-01']
+        
         else:
-            # Split by proportion
             panel = panel.sort_values('Date')
+            
             train_end_idx = int(len(panel) * (1 - test_size - val_size))
             val_end_idx = int(len(panel) * (1 - test_size))
+            
             train = panel.iloc[:train_end_idx]
             valid = panel.iloc[train_end_idx:val_end_idx]
             test = panel.iloc[val_end_idx:]
-        
-        # Apply undersampling to balance classes if requested
-        if undersample:
-            train_ratings = train['rating'].values
-            unique_ratings, rating_counts = np.unique(train_ratings, return_counts=True)
+
+         # Function to balance a dataset using undersampling
+        def balance_by_undersampling(df, feature_columns):
+            ratings = df['rating'].values
+            unique_ratings, rating_counts = np.unique(ratings, return_counts=True)
             min_class_count = np.min(rating_counts)
             
-            print(f"Original training set: {len(train)} samples")
+            print(f"Original dataset: {len(df)} samples")
             print("Class distribution before undersampling:")
             for rating, count in zip(unique_ratings, rating_counts):
                 print(f"  Class {rating}: {count} samples")
             
-            # Create balanced indices by undersampling majority classes
             balanced_indices = []
             for rating in unique_ratings:
-                rating_indices = np.where(train_ratings == rating)[0]
+                rating_indices = np.where(ratings == rating)[0]
                 if len(rating_indices) > min_class_count:
                     np.random.seed(42)  # for reproducibility
                     selected_indices = np.random.choice(rating_indices, min_class_count, replace=False)
@@ -297,44 +297,81 @@ class DataProcessor:
                 else:
                     balanced_indices.extend(rating_indices)
             
-            # Create balanced training set
-            train = train.iloc[balanced_indices].copy()
+            balanced_df = df.iloc[balanced_indices].copy()
             
-            train_ratings = train['rating'].values
-            unique_ratings, rating_counts = np.unique(train_ratings, return_counts=True)
-            print(f"Balanced training set: {len(train)} samples")
+            balanced_ratings = balanced_df['rating'].values
+            unique_ratings, rating_counts = np.unique(balanced_ratings, return_counts=True)
+            print(f"Balanced dataset: {len(balanced_df)} samples")
             print("Class distribution after undersampling:")
             for rating, count in zip(unique_ratings, rating_counts):
                 print(f"  Class {rating}: {count} samples")
+            
+            return balanced_df[feature_columns], balanced_df['rating'].values
         
-        X_train = train[feature_cols]
-        X_val = valid[feature_cols]
-        X_test = test[feature_cols]
-        
-        y_train = train['rating'].values
-        y_val = valid['rating'].values
-        y_test = test['rating'].values
-
-         # Apply SMOTE to balance classes if requested
-        if smote:
-            unique_ratings, rating_counts = np.unique(y_train, return_counts=True)
-            print(f"Original training set: {len(X_train)} samples")
+        def balance_by_smote_with_nan_handling(df, feature_columns):
+            X = df[feature_columns]
+            y = df['rating'].values
+            
+            unique_ratings, rating_counts = np.unique(y, return_counts=True)
+            print(f"Original dataset: {len(X)} samples")
             print("Class distribution before SMOTE:")
             for rating, count in zip(unique_ratings, rating_counts):
                 print(f"  Class {rating}: {count} samples")
             
-            # Apply SMOTE
-            sm = SMOTE(random_state=42)
-            X_train_resampled, y_train_resampled = sm.fit_resample(X_train, y_train)
+
+            X_original = X.copy()            
+            nan_mask = X.isna() # Create a mask of missing values to restore later
+            imputer = SimpleImputer(strategy='mean') # Impute missing values for SMOTE (only for creating synthetic samples)
+            X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
             
-            unique_ratings, rating_counts = np.unique(y_train_resampled, return_counts=True)
-            print(f"SMOTE-balanced training set: {len(X_train_resampled)} samples")
+            # Apply SMOTE on the imputed data
+            print("Applying SMOTE with imputed values for synthetic sample generation...")
+            sm = SMOTE(random_state=42)
+            X_resampled, y_resampled = sm.fit_resample(X_imputed, y)
+            X_resampled_df = pd.DataFrame(X_resampled, columns=X.columns)
+            
+            synthetic_mask = np.ones(len(X_resampled_df), dtype=bool)
+            synthetic_mask[:len(X)] = False
+            
+            # For original samples, restore their original values (with NaNs)
+            for i, was_original in enumerate(~synthetic_mask):
+                if was_original:
+                    original_idx = i  # Index in the original dataset
+                    X_resampled_df.iloc[i] = X_original.iloc[original_idx]
+            
+            unique_ratings, rating_counts = np.unique(y_resampled, return_counts=True)
+            print(f"SMOTE-balanced dataset: {len(X_resampled_df)} samples")
             print("Class distribution after SMOTE:")
             for rating, count in zip(unique_ratings, rating_counts):
                 print(f"  Class {rating}: {count} samples")
             
-            X_train = X_train_resampled
-            y_train = y_train_resampled
+            return X_resampled_df, y_resampled
+    
+    
+        # Apply undersampling to balance classes if requested
+        if undersample:
+            X_train, y_train = balance_by_undersampling(train, feature_cols)
+            X_val, y_val = balance_by_undersampling(valid, feature_cols)
+            X_test, y_test = balance_by_undersampling(test, feature_cols)
+        
+        elif smote:
+            print("\nBalancing training data using SMOTE...")
+            X_train_temp, y_train = balance_by_smote_with_nan_handling(train, feature_cols)
+            X_val_temp, y_val = balance_by_smote_with_nan_handling(valid, feature_cols)
+            X_test_temp, y_test = balance_by_smote_with_nan_handling(test, feature_cols)
+            X_train = pd.DataFrame(X_train_temp, columns=feature_cols)
+            X_val = pd.DataFrame(X_val_temp, columns=feature_cols)
+            X_test = pd.DataFrame(X_test_temp, columns=feature_cols)
+
+        else:
+            # No balancing, just extract features and targets
+            X_train = train[feature_cols]
+            X_val = valid[feature_cols]
+            X_test = test[feature_cols]
+            
+            y_train = train['rating'].values
+            y_val = valid['rating'].values
+            y_test = test['rating'].values
         
         scaler = StandardScaler()
         X_train = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
@@ -343,16 +380,17 @@ class DataProcessor:
         
         return X_train, X_val, X_test, y_train, y_val, y_test
     
-    def prepare_data_pipeline(self,test_size: float = 0.2,val_size: float = 0.2,undersample: bool = False,smote: bool = False) -> Tuple:
+    def prepare_data_pipeline(self,test_size: float = 0.2, val_size: float = 0.2, undersample: bool = False, smote: bool = False) -> Tuple:
         """
         End-to-end data pipeline from loading to train/val/test split.
         
         Args:
+            credit_ratings_path: Path to credit ratings data
+            fundamentals_path: Path to fundamentals data
+            macro_path: Path to macroeconomic data
             lag_periods: List of lag periods
             test_size: Proportion for test set
             val_size: Proportion for validation set
-            undersample: Whether to balance classes by undersampling the majority class
-            smote: Whether to balance classes by SMOTE
             
         Returns:
             X_train, X_val, X_test, y_train, y_val, y_test
@@ -361,6 +399,7 @@ class DataProcessor:
         dataframes_dict = self.merge_data()
         feature_data = self.create_lagged_features(dataframes_dict)
         
+        print('arguments: ', test_size, val_size, undersample)
         # Split data
         return self.split_data(feature_data, test_size, val_size, undersample, smote)
     
@@ -468,7 +507,7 @@ class CreditRatingModel:
         random_search = RandomizedSearchCV(
             estimator=pipeline,
             param_distributions=pipeline_param_grid,
-            n_iter=200,  # Try 100 combinations instead of all 1215
+            n_iter=300,  # Try 100 combinations instead of all 1215
             cv=5,
             scoring='accuracy',
             n_jobs=4,
@@ -558,7 +597,6 @@ class CreditRatingModel:
         plt.title('Confusion Matrix')
         plt.tight_layout()
         plt.show()
-        
         return metrics
     
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -621,7 +659,12 @@ class ModelManager:
         
         print(f"Starting stage: {stages[0]}")
         # Prepare data
-        X_train, X_val, X_test, y_train, y_val, y_test = self.data_processor.prepare_data_pipeline(test_size=self.config.get('test_size', 0.2),val_size=self.config.get('val_size', 0.2),undersample=self.config.get('undersample', False),smote=self.config.get('smote', False))
+        X_train, X_val, X_test, y_train, y_val, y_test = self.data_processor.prepare_data_pipeline(
+            test_size=self.config.get('test_size', 0.2),
+            val_size=self.config.get('val_size', 0.2),
+            undersample=self.config.get('undersample', False),
+            smote=self.config.get('smote', False)
+        )
         overall_progress.update(1)
         
         # Tune hyperparameters if specified
@@ -659,7 +702,9 @@ class ModelManager:
         }
     
 
+# Example usage
 if __name__ == "__main__":
+    # Configuration
     config = {
         'data_config': {
             'macro_data_path': 'data/Macro_data.xlsx',
@@ -673,7 +718,7 @@ if __name__ == "__main__":
             'subsample': 0.6,
             'colsample_bytree': 0.7
         },
-        'test_size': None,
+        'test_size': None, 
         'val_size': None,
         'undersample': True,
         'smote': False,
