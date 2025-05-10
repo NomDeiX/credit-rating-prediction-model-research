@@ -231,7 +231,7 @@ class DataProcessor:
 
         #lags: one quarter back for every numeric column --
         lag_cols = [c for c in panel.columns if c not in ['Date', 'ticker', 'rating']]
-        for lag in [1,2,3,4]:                       # add more lags later [1,2,3,4]
+        for lag in [1]:                       # add more lags later [1,2,3,4]
             panel[[f'{c}_lag{lag}' for c in lag_cols]] = (
                 panel.groupby('ticker')[lag_cols]
                     .shift(lag))
@@ -262,9 +262,9 @@ class DataProcessor:
 
         # Split data either by date or by proportion
         if test_size is None or val_size is None:
-            train = panel[panel['Date'] < '2023-01-01']
-            valid = panel[(panel['Date'] >= '2023-01-01') & (panel['Date'] < '2024-01-01')]
-            test = panel[panel['Date'] >= '2024-01-01']
+            train = panel[panel['Date'] < '2013-01-01']  # Up to Q4 2012
+            valid = panel[(panel['Date'] >= '2013-01-01') & (panel['Date'] < '2015-01-01')]  # Q1 2013 to Q4 2014
+            test = panel[(panel['Date'] >= '2015-01-01') & (panel['Date'] < '2017-01-01')]  # Q1 2015 to Q4 2016
         
         else:
             panel = panel.sort_values('Date')
@@ -718,8 +718,8 @@ if __name__ == "__main__":
             'subsample': 0.6,
             'colsample_bytree': 0.7
         },
-        'test_size': None, 
-        'val_size': None,
+        'test_size': 0.2, 
+        'val_size': 0.2,
         'undersample': True,
         'smote': False,
         'tune_hyperparameters': False
